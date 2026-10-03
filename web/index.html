@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>LILA BLACK · Player Journey Explorer</title>
+<style>
+:root{--bg:#12141a;--panel:#1b1e27;--line:#2d3240;--tx:#e6e8ee;--mu:#8b92a5;--ac:#4fd1c5}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--tx);font:13px/1.4 system-ui,sans-serif;display:flex;height:100vh}
+aside{width:300px;background:var(--panel);border-right:1px solid var(--line);padding:14px;overflow:auto;flex:none}
+h1{font-size:15px;margin:0 0 2px}h2{font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:var(--mu);margin:16px 0 6px}
+.sub{color:var(--mu);font-size:12px}select,button{background:#262a36;color:var(--tx);border:1px solid var(--line);border-radius:6px;padding:6px 8px;font:inherit}
+select{width:100%;margin-bottom:6px}button{cursor:pointer}button.on{background:var(--ac);color:#0b1215;border-color:var(--ac)}
+.row{display:flex;gap:6px;flex-wrap:wrap}.row button{flex:1}label{display:flex;align-items:center;gap:7px;margin:3px 0;cursor:pointer}
+.sw{width:11px;height:11px;border-radius:50%;display:inline-block}
+main{flex:1;display:flex;flex-direction:column;min-width:0;padding:12px;gap:10px}
+#wrap{flex:1;min-height:0;display:flex;justify-content:center;align-items:center}canvas{max-width:100%;max-height:100%;aspect-ratio:1;background:#000;border-radius:8px;border:1px solid var(--line)}
+#bar{display:flex;gap:10px;align-items:center;background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:8px 12px}
+#bar input[type=range]{flex:1}#tm{width:92px;text-align:right;font-variant-numeric:tabular-nums}
+#stats{color:var(--mu);font-size:12px;margin-top:8px}.hint{color:var(--mu);font-size:11px;margin-top:4px}
+</style></head><body>
+<aside>
+<h1>LILA BLACK · Journey Explorer</h1><div class="sub">Feb 10–14, 2026 · telemetry viewer for Level Design</div>
+<h2>Filter</h2>
+<select id="map"><option value="AmbroseValley">Ambrose Valley</option><option value="GrandRift">Grand Rift</option><option value="Lockdown">Lockdown</option></select>
+<select id="day"></select><select id="match"></select><select id="player" title="Show a single player"></select>
+<div id="stats"></div>
+<h2>Time window <span id="tw" style="text-transform:none;letter-spacing:0"></span></h2>
+<label>From <input type="range" id="t0" min="0" max="0" value="0" style="flex:1"></label>
+<label>To&nbsp;&nbsp;&nbsp;<input type="range" id="t1" min="0" max="0" value="0" style="flex:1"></label>
+<div class="hint">Seconds since match start. Limits heatmaps, paths and markers (e.g. first 2 minutes = landing fights; last 3 = storm).</div>
+<h2>Heatmap</h2>
+<div class="row" id="hm"></div>
+<label>Opacity <input type="range" id="hmo" min="20" max="100" value="75" style="flex:1"></label>
+<div class="hint">With “All matches” the heatmap aggregates the filtered set; with one match it builds up as you play.</div>
+<h2>Layers</h2>
+<label><input type="checkbox" id="lHum" checked><span class="sw" style="background:#4fd1c5"></span>Human paths</label>
+<label><input type="checkbox" id="lBot" checked><span class="sw" style="background:#f6ad55"></span>Bot paths</label>
+<label><input type="checkbox" id="lEv" checked>Event markers</label>
+<h2>Legend</h2><div id="leg"></div>
+<div class="hint">Heatmaps/markers use pixel positions mapped from world (x,z); elevation (y) is ignored.</div>
+</aside>
+<main><div id="wrap"><canvas id="cv" width="1024" height="1024"></canvas></div>
+<div id="bar"><button id="play">▶ Play</button><input type="range" id="sl" min="0" max="0" value="0"><span id="tm">0:00 / 0:00</span>
+<select id="spd" style="width:auto;margin:0"><option value="1">1×</option><option value="4">4×</option><option value="10" selected>10×</option><option value="30">30×</option></select></div></main>
+<script>
+const cv=document.getElementById('cv'),ctx=cv.getContext('2d'),$=id=>document.getElementById(id);
+const EV={K:['Kill (human→human)','#ff4d4d','star'],D:['Killed by human','#ff4d4d','x'],BK:['Bot kill (player killed bot)','#f6ad55','dia'],
+ BD:['Killed by bot','#b794f4','x'],S:['Storm death','#63b3ed','tri'],L:['Loot','#68d391','dot']};
+const HM={traffic:'Traffic',kills:'Kills',deaths:'Deaths',loot:'Loot',storm:'Storm deaths'};
+const HEV={kills:['K','BK'],deaths:['D','BD','S'],loot:['L'],storm:['S']};
+const ok=p=>!P||p.u===P;let P='';let DATA={},img=new Image(),cur=null,hm='traffic',T=0,playing=false,last=0,list=[];
+$('leg').innerHTML=Object.values(EV).map(e=>`<label style="cursor:default"><span class="sw" style="background:${e[1]}"></span>${e[0]}</label>`).join('');
+$('hm').innerHTML=['none',...Object.keys(HM)].map(k=>`<button data-k="${k}" class="${k===hm?'on':''}">${HM[k]||'Off'}</button>`).join('');
+$('hm').onclick=e=>{if(e.target.dataset.k){hm=e.target.dataset.k;[...$('hm').children].forEach(b=>b.classList.toggle('on',b===e.target));draw()}};
+const fmt=s=>Math.floor(s/60)+':'+String(Math.floor(s%60)).padStart(2,'0');
+async function load(){const m=$('map').value;if(!DATA[m])DATA[m]=await (await fetch(`data/${m}.json`)).json();
+ await new Promise(r=>{img.onload=r;img.src=`minimaps/${m}.jpg`});
+ const days=[...new Set(DATA[m].matches.map(x=>x.day))];
+ $('day').innerHTML='<option value="">All days</option>'+days.map(d=>`<option value="${d}">Feb ${d}</option>`).join('');setDay()}
+function setDay(){const d=$('day').value,ms=DATA[$('map').value].matches.filter(x=>!d||x.day==d);list=ms;
+ $('match').innerHTML=`<option value="">All matches (${ms.length})</option>`+ms.map((x,i)=>{const h=x.players.filter(p=>!p.b).length,b=x.players.filter(p=>p.b).length;
+  return `<option value="${i}">Feb ${x.day} · ${x.id} · ${fmt(x.dur)} · ${h}H/${b}B</option>`}).join('');setMatch()}
+function setMatch(){const i=$('match').value;cur=i===''?null:list[i];playing=false;$('play').textContent='▶ Play';
+ const max=cur?cur.dur:0;$('sl').max=max;$('sl').value=T=max;$('sl').disabled=!cur;$('play').disabled=!cur;fillPlayers();setWin(cur?cur.dur:Math.max(1,...list.map(m=>m.dur)))}
+function fillPlayers(){let o;if(cur)o=[...cur.players].sort((a,b)=>a.b-b.b).map(p=>[p.u,(p.b?'Bot ':'Human ')+p.u]);
+ else{const c={};list.forEach(m=>m.players.forEach(p=>{if(!p.b)c[p.u]=(c[p.u]||0)+1}));o=Object.entries(c).sort((a,b)=>b[1]-a[1]).map(([u,n])=>[u,`Human ${u} · ${n} match${n>1?'es':''}`])}
+ P='';$('player').innerHTML='<option value="">All players</option>'+o.map(x=>`<option value="${x[0]}">${x[1]}</option>`).join('')}
+function setWin(max){$('t0').max=$('t1').max=max;$('t0').value=0;$('t1').value=max;win()}
+function win(e){let a=+$('t0').value,b=+$('t1').value;if(a>b){if(e&&e.target.id==='t0')$('t1').value=b=a;else $('t0').value=a=b}
+ $('tw').textContent=`${fmt(a)}–${fmt(b)}`;stats();draw()}
+function stats(){const ms=cur?[cur]:list,c={};let hp=0,bp=0;
+ const lo=+$('t0').value,hi=+$('t1').value;ms.forEach(m=>m.players.forEach(p=>{if(!ok(p))return;p.b?bp++:hp++;p.e.forEach(e=>{if(e[0]>=lo&&e[0]<=hi)c[e[3]]=(c[e[3]]||0)+1})}));
+ $('stats').innerHTML=`${ms.length} match${ms.length>1?'es':''} · ${hp} human / ${bp} bot journeys<br>`+Object.keys(EV).map(k=>`${EV[k][0].split(' (')[0]}: <b>${c[k]||0}</b>`).join(' · ')}
+function pts(){const ms=cur?[cur]:list,out=[];const lo=+$('t0').value,t=Math.min(cur?T:1e9,+$('t1').value),wantTraffic=hm==='traffic',ev=HEV[hm];
+ ms.forEach(m=>m.players.forEach(p=>{if(!ok(p)||(p.b?!$('lBot').checked:!$('lHum').checked))return;
+  if(wantTraffic)p.p.forEach(r=>{if(r[0]>=lo&&r[0]<=t)out.push(r)});else if(ev)p.e.forEach(r=>{if(r[0]>=lo&&r[0]<=t&&ev.includes(r[3]))out.push(r)})}));return out}
+const G=256,RAMP=[[0,0,0,0],[0,0,255,.35],[0,255,255,.6],[0,255,0,.75],[255,255,0,.9],[255,0,0,1]];
+function ramp(v){const f=v*(RAMP.length-1),i=Math.min(Math.floor(f),RAMP.length-2),k=f-i,a=RAMP[i],b=RAMP[i+1];return a.map((x,j)=>x+(b[j]-x)*k)}
+function heat(){const p=pts();if(!p.length)return;const g=new Float32Array(G*G),s=G/1024,R=hm==='traffic'?5:9;
+ for(const r of p){const cx=r[1]*s,cy=r[2]*s;for(let y=Math.max(0,cy-R|0);y<Math.min(G,cy+R+1);y++)for(let x=Math.max(0,cx-R|0);x<Math.min(G,cx+R+1);x++){
+  const d=((x-cx)**2+(y-cy)**2)/(R*R);if(d<1)g[y*G+x]+=(1-d)**2}}
+ const srt=Float32Array.from(g.filter(v=>v>0)).sort(),mx=srt[Math.floor(srt.length*.98)]||1,o=new ImageData(G,G);
+ for(let i=0;i<g.length;i++){if(g[i]<=0)continue;const c=ramp(Math.min(1,g[i]/mx));o.data.set([c[0],c[1],c[2],c[3]*255],i*4)}
+ const off=document.createElement('canvas');off.width=off.height=G;off.getContext('2d').putImageData(o,0,0);
+ ctx.globalAlpha=$('hmo').value/100;ctx.imageSmoothingEnabled=true;ctx.drawImage(off,0,0,1024,1024);ctx.globalAlpha=1}
+function marker(x,y,k,sz){const[,c,sh]=EV[k];ctx.fillStyle=ctx.strokeStyle=c;ctx.lineWidth=3;ctx.beginPath();
+ if(sh==='dot'){ctx.arc(x,y,sz*.55,0,7);ctx.fill()}
+ else if(sh==='x'){ctx.moveTo(x-sz,y-sz);ctx.lineTo(x+sz,y+sz);ctx.moveTo(x+sz,y-sz);ctx.lineTo(x-sz,y+sz);ctx.stroke()}
+ else if(sh==='dia'){ctx.moveTo(x,y-sz);ctx.lineTo(x+sz,y);ctx.lineTo(x,y+sz);ctx.lineTo(x-sz,y);ctx.closePath();ctx.fill()}
+ else if(sh==='tri'){ctx.moveTo(x,y-sz);ctx.lineTo(x+sz,y+sz);ctx.lineTo(x-sz,y+sz);ctx.closePath();ctx.fill()}
+ else{for(let i=0;i<10;i++){const a=i*Math.PI/5-Math.PI/2,r=i%2?sz*.45:sz*1.2;ctx.lineTo(x+Math.cos(a)*r,y+Math.sin(a)*r)}ctx.closePath();ctx.fill()}
+ ctx.strokeStyle='#000';ctx.lineWidth=1;if(sh!=='x')ctx.stroke()}
+function draw(){ctx.clearRect(0,0,1024,1024);if(img.complete)ctx.drawImage(img,0,0,1024,1024);ctx.fillStyle='rgba(0,0,0,.25)';ctx.fillRect(0,0,1024,1024);
+ if(hm!=='none')heat();const ms=cur?[cur]:list,lo=+$('t0').value,t=Math.min(cur?T:1e9,+$('t1').value),one=!!cur,showEv=$('lEv').checked;
+ ms.forEach(m=>m.players.forEach(p=>{if(!ok(p)||(p.b?!$('lBot').checked:!$('lHum').checked))return;
+  const col=p.b?'246,173,85':'79,209,197';ctx.strokeStyle=`rgba(${col},${one?.9:.12})`;ctx.lineWidth=one?(p.b?1.5:2.5):1;ctx.beginPath();let h=null;
+  for(const r of p.p){if(r[0]>t)break;if(r[0]<lo)continue;h=r;ctx.lineTo(r[1],r[2])}ctx.stroke();
+  if(one&&h){ctx.fillStyle=p.b?'#f6ad55':'#4fd1c5';ctx.beginPath();ctx.arc(h[1],h[2],p.b?4:6,0,7);ctx.fill();ctx.strokeStyle='#fff';ctx.lineWidth=1.5;ctx.stroke()}
+  if(showEv&&(one||P||ms.length<=60))p.e.forEach(e=>{if(e[0]<=t&&e[0]>=lo)marker(e[1],e[2],e[3],one?9:5)})}));
+ $('tm').textContent=cur?`${fmt(T)} / ${fmt(cur.dur)}`:'—'}
+function tick(n){if(!playing)return;T=Math.min(cur.dur,T+(n-last)/1000*$('spd').value);last=n;$('sl').value=T;draw();
+ if(T>=cur.dur){playing=false;$('play').textContent='▶ Play'}else requestAnimationFrame(tick)}
+$('play').onclick=()=>{if(playing){playing=false;$('play').textContent='▶ Play';return}if(T>=cur.dur)T=0;playing=true;last=performance.now();$('play').textContent='❚❚ Pause';requestAnimationFrame(tick)};
+$('sl').oninput=()=>{T=+$('sl').value;draw()};
+$('player').onchange=()=>{P=$('player').value;stats();draw()};$('t0').oninput=$('t1').oninput=win;$('map').onchange=load;$('day').onchange=setDay;$('match').onchange=setMatch;['lHum','lBot','lEv','hmo'].forEach(i=>$(i).oninput=draw);
+load();
+</script></body></html>
